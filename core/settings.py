@@ -164,3 +164,5 @@ REST_FRAMEWORK = {
 }
 
 CORS_ALLOW_ALL_ORIGINS = True
+
+LOGIN_REDIRECT_URL = '/api/products/'

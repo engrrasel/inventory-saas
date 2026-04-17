@@ -1,14 +1,27 @@
 from rest_framework import viewsets, permissions, filters
-from rest_framework.exceptions import PermissionDenied
-from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import Category, Product, StockHistory
-from .serializers import CategorySerializer, ProductSerializer, StockHistorySerializer
+from django.db.models import Sum, F, DecimalField, ExpressionWrapper
+from django.utils.timezone import now
+from django_filters.rest_framework import DjangoFilterBackend
 
 from datetime import timedelta
 
+from .models import Category, Product, StockHistory, Purchase
+from .serializers import (
+    CategorySerializer,
+    ProductSerializer,
+    StockHistorySerializer,
+    PurchaseSerializer,
+    DashboardSerializer
+)
 
-# ✅ Custom Permission (Company required)
+
+# =========================
+# ✅ PERMISSION
+# =========================
 class IsCompanyUser(permissions.BasePermission):
     def has_permission(self, request, view):
         return (
@@ -20,12 +33,13 @@ class IsCompanyUser(permissions.BasePermission):
 
 
 # =========================
-# ✅ CATEGORY VIEWSET
+# ✅ CATEGORY
 # =========================
 class CategoryViewSet(viewsets.ModelViewSet):
-    queryset = Category.objects.all()   # 🔥 ADD THIS
+    queryset = Category.objects.all()  # 🔥 MUST for router
     serializer_class = CategorySerializer
     permission_classes = [IsCompanyUser]
+
     filter_backends = [filters.SearchFilter]
     search_fields = ['name']
 
@@ -37,12 +51,13 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
 
 # =========================
-# ✅ PRODUCT VIEWSET
+# ✅ PRODUCT
 # =========================
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.all()   # 🔥 ADD THIS
+    queryset = Product.objects.all()  # 🔥 MUST
     serializer_class = ProductSerializer
     permission_classes = [IsCompanyUser]
+
     filter_backends = [filters.SearchFilter]
     search_fields = ['name']
 
@@ -57,10 +72,10 @@ class ProductViewSet(viewsets.ModelViewSet):
 
 
 # =========================
-# ✅ STOCK HISTORY VIEWSET
+# ✅ STOCK HISTORY
 # =========================
 class StockHistoryViewSet(viewsets.ModelViewSet):
-    queryset = StockHistory.objects.all()   # 🔥 ADD THIS
+    queryset = StockHistory.objects.all()  # 🔥 MUST
     serializer_class = StockHistorySerializer
     permission_classes = [IsCompanyUser]
 
@@ -77,79 +92,79 @@ class StockHistoryViewSet(viewsets.ModelViewSet):
         serializer.save(company=self.request.user.company)
 
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-
-from django.db.models import Sum, F
-from django.utils.timezone import now
-
-from .models import Product, StockHistory
-from .serializers import DashboardSerializer
-
-
+# =========================
+# 📊 DASHBOARD
+# =========================
 class DashboardAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         company = request.user.company
+        today = now().date()
 
-        # 🔹 Total Products
         total_products = Product.objects.filter(company=company).count()
 
-        # 🔹 Total Stock Quantity
         total_stock_quantity = Product.objects.filter(company=company).aggregate(
             total=Sum('quantity')
         )['total'] or 0
 
-        # 🔹 Total Stock Value (price × quantity)
         total_stock_value = Product.objects.filter(company=company).aggregate(
-            total=Sum(F('price') * F('quantity'))
+            total=Sum(F('selling_price') * F('quantity'))
         )['total'] or 0
 
-        # 🔹 Today date
-        today = now().date()
-
-        # 🔹 Today IN
         today_in = StockHistory.objects.filter(
             company=company,
             transaction_type='IN',
             created_at__date=today
         ).aggregate(total=Sum('quantity'))['total'] or 0
 
-        # 🔹 Today OUT
         today_out = StockHistory.objects.filter(
             company=company,
             transaction_type='OUT',
             created_at__date=today
         ).aggregate(total=Sum('quantity'))['total'] or 0
 
-        # 🔹 Low stock (quantity < 5)
+        profit_expr = ExpressionWrapper(
+            (F('product__selling_price') - F('product__buying_price')) * F('quantity'),
+            output_field=DecimalField()
+        )
+
+        total_profit = StockHistory.objects.filter(
+            company=company,
+            transaction_type='OUT'
+        ).aggregate(total=Sum(profit_expr))['total'] or 0
+
+        today_profit = StockHistory.objects.filter(
+            company=company,
+            transaction_type='OUT',
+            created_at__date=today
+        ).aggregate(total=Sum(profit_expr))['total'] or 0
+
         low_stock = Product.objects.filter(
             company=company,
             quantity__lt=5
         ).values('id', 'name', 'quantity')
 
-        data = {
+        return Response({
             "total_products": total_products,
             "total_stock_quantity": total_stock_quantity,
             "total_stock_value": total_stock_value,
             "today_in": today_in,
             "today_out": today_out,
+            "total_profit": total_profit,
+            "today_profit": today_profit,
             "low_stock_products": list(low_stock)
-        }
-
-        serializer = DashboardSerializer(data)
-        return Response(serializer.data)
-    
+        })
 
 
+# =========================
+# 📈 CHART
+# =========================
 class StockChartAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         company = request.user.company
-
         today = now().date()
         days = []
 
@@ -175,3 +190,36 @@ class StockChartAPIView(APIView):
             })
 
         return Response(days)
+
+
+# =========================
+# 🧾 PURCHASE
+# =========================
+class PurchaseViewSet(viewsets.ModelViewSet):
+    queryset = Purchase.objects.all()  # 🔥 MUST
+    serializer_class = PurchaseSerializer
+    permission_classes = [IsCompanyUser]
+
+    def get_queryset(self):
+        return Purchase.objects.filter(
+            company=self.request.user.company
+        ).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(company=self.request.user.company)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        purchase = self.get_object()
+
+        if purchase.status == Purchase.APPROVED:
+            return Response({"error": "Already approved"}, status=400)
+
+        try:
+            purchase.approve(request.user)
+            return Response({
+                "message": "Purchase approved successfully",
+                "purchase_id": purchase.id
+            })
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)

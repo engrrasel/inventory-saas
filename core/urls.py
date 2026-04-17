@@ -24,10 +24,14 @@ from rest_framework_simplejwt.views import (
 urlpatterns = [
     path('admin/', admin.site.urls),
 
-    # 🔐 JWT Auth
-    path('api/login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('api/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    # 🔐 JWT
+    path('api/login/', TokenObtainPairView.as_view()),
+    path('api/refresh/', TokenRefreshView.as_view()),
 
-    path('api/accounts/', include('api.urls')),      # 👈 rename
-    path('api/', include('inventory.urls')),         # 👈 main inventory
+    # 🔗 তোমার apps
+    path('api/accounts/', include('api.urls')),
+    path('api/', include('inventory.urls')),
+
+    # 🔥 THIS IS THE MISSING ONE
+    path('api-auth/', include('rest_framework.urls')),
 ]
